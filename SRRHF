@@ -1,0 +1,649 @@
+# -*- coding: utf-8 -*-
+"""
+SRRHF V1 (Semi-Rigid Rotor + Nuclear Quadrupole Coupling Hamiltonian)  
+--------------------------------------------------------------
+This program fits using a Watson A/S reduced Hamiltonian in the Ir and IIIr representations
+tested with butylamine gauche-produced similar fitting errors as spfit 1/7/26.
+BRAIN of Spectral Processor with Neural Network -a  machine learning/ neural network program.
+
+
+
+                                            created by Michael J. Carrillo
+                                            (prototype fitter)
+"""
+
+import math
+import sys
+import datetime
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Optional
+
+# ------------------------------------------------------------------ #
+# 1. Math Library (Racah Algebra)                                    #
+# ------------------------------------------------------------------ #
+_fact_cache = {0:1, 1:1}
+def fact(n):
+    n_int = int(round(n))
+    if n_int < 0: return 0
+    if n_int in _fact_cache: return _fact_cache[n_int]
+    res = math.factorial(n_int)
+    _fact_cache[n_int] = res
+    return res
+
+def delta(a, b, c):
+    den = fact(a+b+c+1)
+    if den == 0: return 0.0
+    val = fact(a+b-c) * fact(a-b+c) * fact(-a+b+c) / den
+    return math.sqrt(max(0.0, val))
+
+def wigner6j(j1, j2, j3, J1, J2, J3):
+    if (j1+j2<j3) or (abs(j1-j2)>j3): return 0.0
+    if (j1+J2<J3) or (abs(j1-J2)>J3): return 0.0
+    if (J1+j2<J3) or (abs(J1-j2)>J3): return 0.0
+    if (J1+J2<j3) or (abs(J1-J2)>j3): return 0.0
+    
+    tmin = int(round(max(j1+j2+j3, j1+J2+J3, J1+j2+J3, J1+J2+j3)))
+    tmax = int(round(min(j1+j2+J1+J2, j2+j3+J2+J3, j3+j1+J3+J1)))
+    
+    s = 0.0
+    for t in range(tmin, tmax + 1):
+        den = fact(t-(j1+j2+j3))*fact(t-(j1+J2+J3))*fact(t-(J1+j2+J3))*fact(t-(J1+J2+j3)) * \
+              fact(j1+j2+J1+J2-t)*fact(j2+j3+J2+J3-t)*fact(j3+j1+J3+J1-t)
+        if den > 0:
+            num = fact(t+1) * ((-1)**t)
+            s += num / den
+    
+    return s * delta(j1,j2,j3)*delta(j1,J2,J3)*delta(J1,j2,J3)*delta(J1,J2,j3)
+
+def wigner3j(j1, j2, j3, m1, m2, m3):
+    if abs(m1 + m2 + m3) > 1e-9: return 0.0
+    if j3 < abs(j1 - j2) or j3 > j1 + j2: return 0.0
+    if abs(m1) > j1 or abs(m2) > j2 or abs(m3) > j3: return 0.0
+    
+    tmin = int(round(max(0, j2 - j3 - m1, j1 - j3 + m2)))
+    tmax = int(round(min(j1 + j2 - j3, j1 - m1, j2 + m2)))
+    
+    s = 0.0
+    for k in range(tmin, tmax + 1):
+        den = fact(k) * fact(j1 + j2 - j3 - k) * fact(j1 - m1 - k) * \
+              fact(j2 + m2 - k) * fact(j3 - j2 + m1 + k) * fact(j3 - j1 - m2 + k)
+        if den > 0:
+            s += ((-1)**k) / den
+            
+    prefactor_den = fact(j1 + j2 + j3 + 1)
+    if prefactor_den == 0: return 0.0
+    
+    prefactor_val = fact(j1 + j2 - j3) * fact(j1 - j2 + j3) * fact(-j1 + j2 + j3) / prefactor_den * \
+                    fact(j1 + m1) * fact(j1 - m1) * fact(j2 + m2) * fact(j2 - m2) * fact(j3 + m3) * fact(j3 - m3)
+    
+    prefactor = math.sqrt(max(0.0, prefactor_val))
+    
+    res = s * prefactor
+    if int(round(j1 - j2 - m3)) % 2 != 0:
+        res = -res
+    return res
+
+# ------------------------------------------------------------------ #
+# 2. Global Config                                                   #
+# ------------------------------------------------------------------ #
+class P:
+    A = B = C = 0.0
+    DJ = 0.0; DJK = 0.0; DK = 0.0
+    dJ = 0.0; dK = 0.0
+    d1 = 0.0; d2 = 0.0
+    
+    Xaa = 0.0; Xbb_Xcc = 0.0
+    Xab = 0.0; Xac = 0.0; Xbc = 0.0
+    
+    REDUCTION = 'A'
+    REP = 'Ir'
+    TEMP = 300.0; JMIN = 0; JMAX = 10
+    FMIN = 0.0; FMAX = 20000.0 
+    MUA = 1.0; MUB = 0.0; MUC = 0.0
+    kb_MHz = 20836.619 
+    SPINS = [] 
+
+class Run:
+    NAME = ''
+    LINES = []; VARY = []
+    NCY = 10
+    INIT_A = 0.0
+    INIT_B = 0.0
+    INIT_C = 0.0
+    INIT_Xaa = 0.0
+    INIT_Xbb_Xcc = 0.0
+    INIT_Xab = 0.0
+    INIT_Xac = 0.0
+    INIT_Xbc = 0.0
+
+@dataclass
+class Line:
+    N1: int; K1: int; Kp1: int;
+    N2: int; K2: int; Kp2: int;
+    freq: float; weight: float; error: float;
+    F1: Optional[float] = None
+    F2: Optional[float] = None
+    calc: float = 0.0; res: float = 0.0
+
+# ------------------------------------------------------------------ #
+# 3. Input Parser                                                    #
+# ------------------------------------------------------------------ #
+def parse_input(path: str) -> None:
+    try:
+        with open(path, encoding='utf-8', errors='ignore') as f: txt = f.read()
+    except FileNotFoundError: print(f"Error: {path} not found."); sys.exit(1)
+
+    lines = txt.splitlines()
+    if not lines: return
+    Run.NAME = lines[0].strip()
+    Run.LINES = []; Run.VARY = []
+    P.SPINS = []
+    
+    idx = 0; trans_start = -1
+    while idx < len(lines):
+        raw = lines[idx].strip()
+        if raw.upper().startswith('TRANSITIONS') or raw.upper().startswith('TRANSI'): 
+            trans_start = idx; break
+        
+        parts = raw.split()
+        if len(parts) >= 2:
+            key = parts[0].upper()
+            if key in ['TEMP','MUA','MUB','MUC','FMIN','FMAX','JMIN','JMAX','ITER','REDUCTION','REP']:
+                try:
+                    if key in ['JMIN','JMAX','ITER']: val = int(float(parts[1]))
+                    elif key in ['REDUCTION','REP']: val = parts[1]
+                    else: val = float(parts[1])
+                    if key == 'ITER': Run.NCY = val
+                    elif key == 'REDUCTION': P.REDUCTION = val.upper()
+                    elif key == 'REP': P.REP = val
+                    else: setattr(P, key, val)
+                except: pass
+            elif key == 'SPIN':
+                for x in parts[1:]: P.SPINS.append(float(x))
+            elif key in ['A','B','C','DJ','DJK','DK','DELTAJ','DELTAK','D1','D2','XAA','XBB-XCC','XBB_XCC','XAB','XAC','XBC']:
+                attr = key
+                if key == 'DELTAJ': attr = 'dJ'
+                if key == 'DELTAK': attr = 'dK'
+                if key == 'D1': attr = 'd1'
+                if key == 'D2': attr = 'd2'
+                if key in ['XBB-XCC','XBB_XCC']: attr = 'Xbb_Xcc'
+                if key == 'XAA': attr = 'Xaa'
+                if key == 'XAB': attr = 'Xab'
+                if key == 'XAC': attr = 'Xac'
+                if key == 'XBC': attr = 'Xbc'
+                try:
+                    val = float(parts[1])
+                    flag = 0
+                    if len(parts) > 2: flag = int(float(parts[2]))
+                    if hasattr(P, attr): setattr(P, attr, val)
+                    Run.VARY.append((attr, val, flag))
+                except: pass
+        idx += 1
+        
+    Run.INIT_A = P.A
+    Run.INIT_B = P.B
+    Run.INIT_C = P.C
+        
+    if trans_start != -1:
+        has_spin = (len(P.SPINS) > 0 and sum(P.SPINS) > 1e-5)
+        for line in lines[trans_start+1:]:
+            p = line.split()
+            if len(p) < 8: continue
+            try:
+                if len(p) >= 10:
+                    if has_spin:
+                        l = Line(int(p[0]), int(p[1]), int(p[2]), 
+                                 int(p[4]), int(p[5]), int(p[6]),
+                                 float(p[8]), 1.0, float(p[9]),
+                                 F1=float(p[3]), F2=float(p[7]))
+                    else:
+                        l = Line(int(p[0]), int(p[1]), int(p[2]), 
+                                 int(p[4]), int(p[5]), int(p[6]),
+                                 float(p[8]), 1.0, float(p[9]))
+                else:
+                    l = Line(int(p[0]), int(p[1]), int(p[2]), 
+                             int(p[3]), int(p[4]), int(p[5]),
+                             float(p[6]), 1.0, float(p[7]))
+                
+                if l.error > 1e-9: l.weight = 1.0/(l.error**2)
+                else: l.weight = 0.0
+                Run.LINES.append(l)
+            except: continue
+
+# ------------------------------------------------------------------ #
+# 4. Total Matrix Hamiltonian Generation                             #
+# ------------------------------------------------------------------ #
+def build_matrices(J):
+    dim = 2*J + 1
+    K_vals = np.arange(-J, J+1)
+    Jz = np.diag(K_vals)
+    Jp = np.zeros((dim, dim))
+    Jm = np.zeros((dim, dim))
+    for i, K in enumerate(K_vals):
+        if i+1 < dim: Jp[i+1, i] = math.sqrt((J - K)*(J + K + 1))
+        if i-1 >= 0: Jm[i-1, i] = math.sqrt((J + K)*(J - K + 1))
+    Jx = 0.5 * (Jp + Jm)
+    Jy = -0.5j * (Jp - Jm)
+    return Jx, Jy, Jz, K_vals
+
+def build_rot_hamiltonian(J):
+    Jx, Jy, Jz, K_vals = build_matrices(J)
+    
+    if P.REP == 'IIIr': Ja, Jb, Jc = Jx, Jy, Jz 
+    else: Ja, Jb, Jc = Jz, Jx, Jy 
+    
+    Ja2 = Ja @ Ja; Jb2 = Jb @ Jb; Jc2 = Jc @ Jc
+    J2  = Ja2 + Jb2 + Jc2 
+    
+    H = P.A * Ja2 + P.B * Jb2 + P.C * Jc2
+    
+    if P.REDUCTION == 'A':
+        H += -P.DJ * (J2 @ J2) - P.DJK * (J2 @ Jz @ Jz) - P.DK * (Jz @ Jz @ Jz @ Jz)
+        if abs(P.dJ) > 1e-20: H += -2.0 * P.dJ * (J2 @ (Jx @ Jx - Jy @ Jy))
+        if abs(P.dK) > 1e-20: 
+            diff2 = Jx @ Jx - Jy @ Jy
+            H += -P.dK * (Jz @ Jz @ diff2 + diff2 @ Jz @ Jz)
+    elif P.REDUCTION == 'S':
+        H += -P.DJ * (J2 @ J2) - P.DJK * (J2 @ Jz @ Jz) - P.DK * (Jz @ Jz @ Jz @ Jz)
+        if abs(P.d1) > 1e-20 or abs(P.d2) > 1e-20:
+            Jp = Jx + 1j * Jy; Jm = Jx - 1j * Jy
+            Jp2 = Jp @ Jp; Jm2 = Jm @ Jm
+            if abs(P.d1) > 1e-20: H += P.d1 * (J2 @ (Jp2 + Jm2))
+            if abs(P.d2) > 1e-20: H += P.d2 * (Jp2 @ Jp2 + Jm2 @ Jm2)
+            
+    return H, K_vals
+
+def build_quadrupole_block(j1, j2, I, F):
+    dim1 = 2*j1 + 1
+    dim2 = 2*j2 + 1
+    HQ = np.zeros((dim1, dim2), dtype=complex)
+    if I < 1e-9: return HQ
+    
+    sixj = wigner6j(F, I, j1, 2.0, j2, I)
+    if abs(sixj) < 1e-12: return HQ
+    
+    I3 = math.sqrt(I*(2*I - 1) / ((I + 1)*(2*I + 1)*(2*I + 3)))
+    if I3 < 1e-12: return HQ
+    
+    sign_F = 1 if int(round(I + j1 + F)) % 2 == 0 else -1
+    F_factor = sign_F * sixj / I3
+    
+    Xaa = P.Xaa
+    Xbb = -0.5*P.Xaa + 0.5*P.Xbb_Xcc
+    Xcc = -0.5*P.Xaa - 0.5*P.Xbb_Xcc
+    
+    if P.REP == 'IIIr':
+        chi_zz = Xcc; chi_xx = Xaa; chi_yy = Xbb
+        chi_xz = P.Xac; chi_yz = P.Xbc; chi_xy = P.Xab
+    else:
+        chi_zz = Xaa; chi_xx = Xbb; chi_yy = Xcc
+        chi_xz = P.Xab; chi_yz = P.Xac; chi_xy = P.Xbc
+        
+    T0 = 0.5 * chi_zz
+    T1_pos = - (chi_xz + 1j * chi_yz) / math.sqrt(6.0)
+    T1_neg =   (chi_xz - 1j * chi_yz) / math.sqrt(6.0)
+    T2_pos =   (chi_xx - chi_yy + 2j * chi_xy) / math.sqrt(24.0)
+    T2_neg =   (chi_xx - chi_yy - 2j * chi_xy) / math.sqrt(24.0)
+    
+    T_dict = {0: T0, 1: T1_pos, -1: T1_neg, 2: T2_pos, -2: T2_neg}
+    
+    sqrt_j1_j2 = math.sqrt((2*j2 + 1)*(2*j1 + 1))
+    
+    for idx1, k1 in enumerate(range(-j1, j1+1)):
+        for idx2, k2 in enumerate(range(-j2, j2+1)):
+            q = k1 - k2
+            if abs(q) > 2: continue
+            
+            tj = wigner3j(j1, 2.0, j2, -k1, q, k2)
+            if abs(tj) < 1e-12: continue
+            
+            sign_K = 1 if int(round(j1 - k1)) % 2 == 0 else -1
+            M_part = 0.5 * sqrt_j1_j2 * sign_K * tj * T_dict[q]
+            HQ[idx1, idx2] = F_factor * M_part
+            
+    return HQ
+
+def solve_energy_levels(Jmax):
+    has_spin = (len(P.SPINS) > 0 and sum(P.SPINS) > 1e-5)
+    I = P.SPINS[0] if has_spin else 0.0
+    
+    rot_levels = {}
+    for J in range(Jmax + 3):
+        H_rot, K_vals = build_rot_hamiltonian(J)
+        w, v = np.linalg.eigh(H_rot)
+        pairs = []
+        for ka in range(J + 1):
+             for kc in range(J + 1):
+                 if (ka + kc == J) or (ka + kc == J + 1): pairs.append((ka, kc))
+        pairs.sort(key=lambda x: (x[0], -x[1]))
+        rot_levels[J] = []
+        for i in range(len(w)):
+            rot_levels[J].append({'J':J, 'E': w[i], 'vec': v[:, i], 'Ka': pairs[i][0], 'Kc': pairs[i][1], 'hfs': [], 'K_vals': K_vals})
+
+    f_vals = set()
+    for J in range(Jmax + 1):
+        if has_spin:
+            for f in np.arange(abs(J-I), J+I+1.0): f_vals.add(f)
+        else:
+            f_vals.add(float(J))
+            
+    for F in sorted(list(f_vals)):
+        if has_spin:
+            valid_J = [j for j in range(Jmax + 3) if abs(F-I) <= j <= F+I]
+        else:
+            valid_J = [int(F)]
+            
+        dim = sum(2*j + 1 for j in valid_J)
+        H_tot = np.zeros((dim, dim), dtype=complex)
+        
+        idx_offset = 0
+        basis_map = [] 
+        j_offsets = {}
+        
+        for j in valid_J:
+            H_rot, K_vals = build_rot_hamiltonian(j)
+            size = 2*j + 1
+            H_tot[idx_offset:idx_offset+size, idx_offset:idx_offset+size] = H_rot
+            j_offsets[j] = idx_offset
+            for k in K_vals: basis_map.append((j, k))
+            idx_offset += size
+            
+        if has_spin and I > 1e-9:
+            for i_j1, j1 in enumerate(valid_J):
+                for i_j2, j2 in enumerate(valid_J):
+                    if j1 > j2: continue 
+                    
+                    HQ_block = build_quadrupole_block(j1, j2, I, F)
+                    off1, s1 = j_offsets[j1], 2*j1 + 1
+                    off2, s2 = j_offsets[j2], 2*j2 + 1
+                    
+                    H_tot[off1:off1+s1, off2:off2+s2] += HQ_block
+                    if j1 != j2: 
+                        H_tot[off2:off2+s2, off1:off1+s1] += HQ_block.conj().T
+        
+        w, v = np.linalg.eigh(H_tot)
+        
+        for i in range(len(w)):
+            eig_val = w[i]
+            eig_vec = v[:, i]
+            
+            dom_idx = np.argmax(np.abs(eig_vec))
+            dom_J, _ = basis_map[dom_idx]
+            
+            if dom_J > Jmax: continue 
+            
+            j_start = j_offsets[dom_J]
+            vec_J = eig_vec[j_start:j_start + (2*dom_J + 1)]
+            
+            best_ov = -1.0; match_idx = 0
+            if dom_J > 0 and len(rot_levels[dom_J]) > 0:
+                for ri, rstate in enumerate(rot_levels[dom_J]):
+                    ov = abs(np.vdot(rstate['vec'], vec_J))
+                    if ov > best_ov: best_ov=ov; match_idx=ri
+            
+            rot_levels[dom_J][match_idx]['hfs'].append({
+                'F': F, 'E': eig_val, 'vec': vec_J, 'K_vals': np.arange(-dom_J, dom_J+1)
+            })
+            
+    return {J: rot_levels[J] for J in range(Jmax + 1)}
+
+def calc_matrix_intensity(u_hfs, l_hfs, Ju, Jl, I):
+    if abs(u_hfs['F'] - l_hfs['F']) > 1.1: return 0.0
+    
+    Vu = u_hfs['vec']; Vl = l_hfs['vec']
+    Ku = u_hfs['K_vals']; Kl = l_hfs['K_vals']
+    
+    dim_u = len(Vu); dim_l = len(Vl)
+    Phi_Z = np.zeros((dim_u, dim_l))
+    Phi_X = np.zeros((dim_u, dim_l))
+    Phi_Y = np.zeros((dim_u, dim_l), dtype=complex)
+    
+    for iu, k_u in enumerate(Ku):
+        for il, k_l in enumerate(Kl):
+            dk = k_u - k_l
+            if abs(dk) < 0.1: 
+                val = 0.0
+                if Ju == Jl: val = k_u/math.sqrt(Ju*(Ju+1)) if Ju>0 else 0
+                elif Ju == Jl+1: val = math.sqrt(Ju**2 - k_u**2)/math.sqrt(Ju*(2*Ju+1))
+                elif Jl == Ju+1: val = math.sqrt(Jl**2 - k_l**2)/math.sqrt(Jl*(2*Jl+1))
+                Phi_Z[iu, il] = val
+            elif abs(abs(dk)-1.0) < 0.1: 
+                val = 0.0; sign = -1.0 if dk > 0 else 1.0
+                if Ju == Jl:
+                    t = (Jl - k_l*dk)*(Jl + k_l*dk + 1)
+                    if t>0: val = math.sqrt(t)/(2*math.sqrt(Jl*(Jl+1)))
+                elif Ju == Jl+1:
+                    t = (Jl + k_l*dk + 1)*(Jl + k_l*dk + 2)
+                    if t>0: val = sign * math.sqrt(t)/(2*math.sqrt(Ju*(2*Ju+1)))
+                if val != 0.0:
+                    Phi_X[iu, il] += val
+                    Phi_Y[iu, il] += 1j * sign * val
+
+    if P.REP == 'IIIr': Da=Phi_X; Db=Phi_Y; Dc=Phi_Z
+    else: Da=Phi_Z; Db=Phi_X; Dc=Phi_Y
+    
+    S = 0.0
+    if abs(P.MUA) > 1e-9: S += abs(np.vdot(Vu, Da @ Vl))**2 * P.MUA**2
+    if abs(P.MUB) > 1e-9: S += abs(np.vdot(Vu, Db @ Vl))**2 * P.MUB**2
+    if abs(P.MUC) > 1e-9: S += abs(np.vdot(Vu, Dc @ Vl))**2 * P.MUC**2
+    
+    sixj = wigner6j(Ju, u_hfs['F'], I, l_hfs['F'], Jl, 1.0)
+    geom = (2*u_hfs['F']+1)*(2*l_hfs['F']+1) * sixj**2
+    return S * geom
+
+# ------------------------------------------------------------------ #
+# 5. Fit Routine                                                     #
+# ------------------------------------------------------------------ #
+def run_fit(vary_list):
+    print(f"--- Matrix Fit (Numerical Differentiation) ---")
+    p_vec = np.array([getattr(P, p) for p in vary_list])
+    
+    def get_residuals(curr_params):
+        for p, val in zip(vary_list, curr_params): setattr(P, p, val)
+        needed_J = 0
+        for ln in Run.LINES: needed_J = max(needed_J, ln.N1, ln.N2)
+        levels = solve_energy_levels(needed_J)
+        resids = []
+        for ln in Run.LINES:
+            u_parent = next((s for s in levels[ln.N1] if s['Ka']==ln.K1 and s['Kc']==ln.Kp1), None)
+            l_parent = next((s for s in levels[ln.N2] if s['Ka']==ln.K2 and s['Kc']==ln.Kp2), None)
+            calc = 0.0
+            if u_parent and l_parent:
+                if ln.F1 is not None:
+                    u_hfs = next((s for s in u_parent['hfs'] if abs(s['F']-ln.F1)<0.1), None)
+                    l_hfs = next((s for s in l_parent['hfs'] if abs(s['F']-ln.F2)<0.1), None)
+                    if u_hfs and l_hfs: calc = u_hfs['E'] - l_hfs['E']
+                else:
+                    calc = u_parent['E'] - l_parent['E']
+            resids.append(ln.freq - calc)
+            ln.calc = calc; ln.res = ln.freq - calc
+        return np.array(resids)
+
+    for it in range(max(1, Run.NCY)):
+        print(f"Iter {it+1}...")
+        r0 = get_residuals(p_vec)
+        jac = []
+        step = 1e-5
+        for i, p_name in enumerate(vary_list):
+            p_save = p_vec[i]
+            p_vec[i] += step
+            r_plus = get_residuals(p_vec)
+            p_vec[i] = p_save
+            deriv = (r0 - r_plus) / step
+            jac.append(deriv)
+        Jac = np.array(jac).T
+        W = np.diag([ln.weight for ln in Run.LINES])
+        JtW = Jac.T @ W
+        Alpha = JtW @ Jac + np.eye(len(p_vec))*(1e-3 if it<2 else 0.0)
+        Beta = JtW @ r0
+        try: delta_p = np.linalg.solve(Alpha, Beta)
+        except: delta_p = np.linalg.pinv(Alpha) @ Beta
+        p_vec += delta_p
+        if np.max(np.abs(delta_p)) < 1e-7: break
+
+    r_fin = get_residuals(p_vec)
+    RSS = np.sum([ln.weight * ln.res**2 for ln in Run.LINES])
+    dof = max(1, len(Run.LINES) - len(p_vec))
+    rms_fit = np.sqrt(RSS/len(Run.LINES))
+    raw_rms = np.sqrt(np.mean(r_fin**2))
+    Cov = np.linalg.pinv(Jac.T @ W @ Jac) * (RSS/dof)
+    diag_cov = np.diag(Cov).copy()
+    diag_cov[diag_cov < 0] = 0.0
+    unc = np.sqrt(diag_cov)
+    return p_vec, unc, RSS, rms_fit, raw_rms
+
+# ------------------------------------------------------------------ #
+# 6. Writers                                                         #
+# ------------------------------------------------------------------ #
+def get_sorted_params(vary_list, x_values, uncertainties=None):
+    display_map = {'A':'A','B':'B','C':'C','DJ':'DeltaJ','DJK':'DeltaJK','DK':'DeltaK',
+                   'dJ':'deltaJ','dK':'deltaK','d1':'d1','d2':'d2','Xbb_Xcc':'Xbb-Xcc'}
+    data = {}; sorted_output = []
+    if uncertainties is None: uncertainties = [0.0]*len(vary_list)
+    for k, v, u in zip(vary_list, x_values, uncertainties): data[k] = (v, u)
+    
+    order = ['A','B','C','DJ','DJK','DK','dJ','dK','d1','d2','Xaa','Xbb_Xcc','Xab','Xac','Xbc']
+    for k in order:
+        if k in data: sorted_output.append((display_map.get(k,k), data[k][0], data[k][1]))
+    return sorted_output
+
+def write_pred_file(filename, vary_list, p_vals, unc, rss, rms_w, rms_raw):
+    now = datetime.datetime.now()
+    if abs(P.A - P.C) > 1e-9: kappa = (2*P.B - P.A - P.C) / (P.A - P.C)
+    else: kappa = 0.0
+    has_spin = (len(P.SPINS) > 0 and sum(P.SPINS) > 1e-5)
+    
+    with open(filename, 'w') as f:
+        f.write(f"{now.strftime('%H:%M:%S')}          MONTH={now.month}  DAY={now.day}  {now.year}\n")
+        f.write("Input data: \n")
+        f.write("Rotational Constants\n")
+        f.write(f"A = {Run.INIT_A}\n")
+        f.write(f"B = {Run.INIT_B}\n")
+        f.write(f"C = {Run.INIT_C}\n")
+        f.write("DIPOLE MOMENTS\n")
+        f.write(f"MUA  = {P.MUA}\n")
+        f.write(f"MUB  = {P.MUB}\n")
+        f.write(f"MUC  = {P.MUC}\n")
+        f.write("--- SEMI-RIGID ROTOR HYPERFINE FIT ---\n")
+        f.write(f"Input: {filename.replace('.pred','.txt')}\n")
+        f.write(f"Molecule : {Run.NAME}\n")
+        f.write(f"Hamiltonian: Watson {P.REDUCTION}-reduction ({P.REP} representation)\n")
+        f.write(f"Loaded {len(Run.LINES)} transitions.\n")
+        f.write(f"Frequency Range: {P.FMIN} - {P.FMAX} MHz\n")
+        f.write(f"Ray's Asymmetry Parameter (Kappa): {kappa:.4f}\n\n")
+        f.write(f"Fitting {len(vary_list)} params: {vary_list}\n\n")
+        f.write("--- Fit Results ---\n")
+        f.write(f"RMS (Weighted):   {rms_w:.6f} (Target: ~1.0)\n")
+        f.write(f"RMS (Unweighted): {rms_raw:.6f} MHz\n\n")
+        f.write(f"          {'Param':<23}{'Value':<18}Uncertainty\n")
+        f.write("-" * 50 + "\n")
+        for name, val, u in get_sorted_params(vary_list, p_vals, unc): 
+            f.write(f" {name:>14}           {val:13.8f}              {u:10.8f}\n")
+        f.write("\n--- Residuals (MHz) ---\n")
+        
+        hdr = "          J Ka Kc F      J Ka Kc F      Obs      Calc      Diff      Error" if has_spin else "          J Ka Kc      J Ka Kc      Obs      Calc      Diff      Error"
+        f.write(f"{hdr}\n")
+        for ln in Run.LINES:
+            if has_spin and ln.F1 is not None:
+                su = f"{ln.N1:2d} {ln.K1:1d}{ln.Kp1:2d}{ln.F1:4.1f}"
+                sl = f"{ln.N2:2d} {ln.K2:1d}{ln.Kp2:2d}{ln.F2:4.1f}"
+            else:
+                su = f"{ln.N1:2d} {ln.K1:1d}{ln.Kp1:2d}    "
+                sl = f"{ln.N2:2d} {ln.K2:1d}{ln.Kp2:2d}    "
+                
+            f.write(f"   {su}       {sl}         {ln.freq:10.4f}        {ln.calc:10.4f}        {ln.res:8.5f}        {ln.error:6.4f}\n")
+            
+        f.write("-" * 62 + "\n")
+        f.write("Predictions (Center Frequencies)\n\n")
+        levels = solve_energy_levels(P.JMAX)
+        for J in range(1, P.JMAX + 1):
+            groups = {'A': [], 'B': [], 'C': []}
+            for J_lo in [J, J-1]:
+                if J_lo < 0: continue
+                ups = levels[J]; lows = levels[J_lo]
+                for u in ups:
+                    for l in lows:
+                        dKa = abs(u['Ka'] - l['Ka']); dKc = abs(u['Kc'] - l['Kc'])
+                        ttype = None
+                        if (dKa % 2 == 0) and (dKc % 2 != 0): ttype = 'A'
+                        elif (dKa % 2 != 0) and (dKc % 2 != 0): ttype = 'B'
+                        elif (dKa % 2 != 0) and (dKc % 2 == 0): ttype = 'C'
+                        if ttype:
+                            freq = u['E'] - l['E']
+                            if freq < 1e-6 or freq < P.FMIN or freq > P.FMAX: continue
+                            line = f" {u['J']:2d}    {u['Ka']:1d}   {u['Kc']:2d}     {l['J']:2d}    {l['Ka']:1d}   {l['Kc']:2d}       {freq:10.3f}\n"
+                            groups[ttype].append((freq, line))
+            for ttype in ['A', 'B', 'C']:
+                lines = groups[ttype]; lines.sort(key=lambda x: x[0])
+                if lines:
+                    f.write(f"     {ttype} type transitions for J = {J:2d}\n")
+                    for _, txt in lines: f.write(txt)
+                    f.write("\n")
+
+def write_freq_file(filename):
+    print("Generating Catalog...")
+    levels = solve_energy_levels(P.JMAX)
+    trans = []
+    kT = P.kb_MHz * P.TEMP
+    has_spin = (len(P.SPINS) > 0 and sum(P.SPINS) > 1e-5)
+    I = P.SPINS[0] if has_spin else 0.0
+    j_start = max(1, P.JMIN)
+    for Ju in range(j_start, P.JMAX+1):
+        for Jl in [Ju, Ju-1]:
+            if Jl < 0: continue
+            ups = levels[Ju]; lows = levels[Jl]
+            for u in ups:
+                for l in lows:
+                    if abs(u['Ka']-l['Ka'])>1 or abs(u['Kc']-l['Kc'])>1: continue
+                    if has_spin:
+                        for u_hfs in u['hfs']:
+                            for l_hfs in l['hfs']:
+                                freq = u_hfs['E'] - l_hfs['E']
+                                if freq < P.FMIN or freq > P.FMAX: continue
+                                S = calc_matrix_intensity(u_hfs, l_hfs, Ju, Jl, I)
+                                if S < 1e-9: continue
+                                boltz = math.exp(-l_hfs['E']/kT) - math.exp(-u_hfs['E']/kT)
+                                inten = freq * S * boltz
+                                if inten <= 1e-30: continue
+                                qu = f"{u['J']:2d} {u['Ka']:2d} {u['Kc']:2d} {u_hfs['F']:3.1f}"
+                                ql = f"{l['J']:2d} {l['Ka']:2d} {l['Kc']:2d} {l_hfs['F']:3.1f}"
+                                trans.append({'f': freq, 'i_abs': inten, 'qs': f"{qu}   {ql}"})
+                    else:
+                        freq = u['E'] - l['E']
+                        if freq < P.FMIN or freq > P.FMAX: continue
+                        u_hfs = u['hfs'][0]; l_hfs = l['hfs'][0]
+                        S = calc_matrix_intensity(u_hfs, l_hfs, Ju, Jl, 0.0)
+                        if S < 1e-9: continue
+                        boltz = math.exp(-l['E']/kT) - math.exp(-u['E']/kT)
+                        inten = freq * S * boltz
+                        if inten <= 1e-30: continue
+                        qu = f"{u['J']:2d} {u['Ka']:2d} {u['Kc']:2d}"
+                        ql = f"{l['J']:2d} {l['Ka']:2d} {l['Kc']:2d}"
+                        trans.append({'f': freq, 'i_abs': inten, 'qs': f"{qu}   {ql}"})
+
+    if trans:
+        max_i = max(t['i_abs'] for t in trans)
+        for t in trans: t['i'] = math.log10(t['i_abs']/max_i + 1e-20)
+    trans.sort(key=lambda x: x['f'])
+    with open(filename, 'w') as f:
+        now = datetime.datetime.now()
+        f.write(f"{now.strftime('%H:%M:%S')}          MONTH={now.month}  DAY={now.day}  {now.year}\n")
+        f.write(f"Frequency      LogInt    QNs (Up - Low)\n")
+        f.write("-------------------------------------------------------\n")
+        for t in trans: f.write(f"   {t['f']:9.4f}       {t['i']:7.4f}    {t['qs']}\n")
+
+def main():
+    in_file = "3top_input.txt"
+    if len(sys.argv) > 1: in_file = sys.argv[1]
+    parse_input(in_file)
+    vary_list = [p for p, v, f in Run.VARY if f == 2]
+    if vary_list and Run.LINES:
+        p_vec, unc, rss, rms_w, rms_raw = run_fit(vary_list)
+        write_pred_file(in_file.replace('.txt','.pred'), vary_list, p_vec, unc, rss, rms_w, rms_raw)
+    else:
+        write_pred_file(in_file.replace('.txt','.pred'), [], [], [], 0, 0, 0)
+    write_freq_file(in_file.replace('.txt','.freq'))
+
+if __name__ == "__main__":
+    main()

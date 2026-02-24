@@ -1,0 +1,55 @@
+Input file
+
+
+
+generic input file
+ITER   10
+FORMAT RIGID
+REDUCTION S 
+REP Ir
+SPIN   1.0
+FTH    0.01
+FDIF   0.0025
+OLVL   0
+DUMP   1.0
+
+# --- Prediction Settings ---
+TEMP   3.0
+JMIN   0
+JMAX   25
+FMIN   10000.0   
+FMAX   18000.0  
+MUA    3.0
+MUB    0.3
+MUC    0.3
+# ----------------------------
+A        1111.111 2
+B         520.429 2
+C         120.477 2
+-----------------------------
+Quartic centrifugal distortion 
+S-reduced
+DJ       0.00         2
+DJK      -0.0         2
+DK       0.0          2
+d1       0.00         2
+d2       0.00         2
+
+A-reduced
+DJ       0.00         1
+DJK      0.0          1
+DK       0.00         1
+deltaJ   0.0          1
+deltaK   0.0          1
+-----------------------------
+Nuclear Quadrupole Coupling
+Nucleus 1
+Xaa      -5.077        2
+Xbb-Xcc   1.063        2
+Xab       0.00         1
+Xac       0.0          1
+Xbc       0.0          1
+
+TRANSITIONS
+ 10  1  9  9  9  1  8  8   8801.007      .005
+
