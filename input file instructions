@@ -1,0 +1,56 @@
+***************************************
+THIS FILE IS JUST THE INSTRUCTIONS FOR THE INPUT FILE ( use the actual input file in the directory)
+DO NOT ATTEMPT TO RUN THIS FILE AS IT PROBABLY WONT RUN SRRHF3.0.EXE
+***************************************
+PrOMe (proline methyl ester: Marasinghe et. al. DOI: 10.1039/D5CP00898K (Paper) Phys. Chem. Chem. Phys., 2025, 27, 13167-13173)
+ITER   10 (number of iterations program runs)
+FORMAT RIGID
+REDUCTION S (Reduction, replace with capital A for A-reduced)
+REP Ir  (Ir repersentation)
+SPIN   1.0 (nuclear spin)
+
+# --- Prediction Settings ---
+TEMP   3.0 (rotational temperature)
+JMIN   0 (minimum angular momentum quantum number)
+JMAX   25 ( maximum angular momentum quantum number)
+FMIN   10000.0   (minimum frequency for prediction)
+FMAX   18000.0   (maximum frequency)
+MUA    3.0       (dipole moments)
+MUB    0.3
+MUC    0.3
+# ----------------------------
+A         3678.1101 2  (rotational constants)   **FROM HERE ON DOWN**
+B        1037.54970 2  ( RULES FOR 2 AND 1.
+C        944.204226 2  (2= FITTING PARAMETER, 1= PREDICTION MODE) IN ORDER TO RUN PREDICTION MODE ALL 2 MUST BE 1)
+-----------------------------
+Quartic centrifugal distortion 
+S-reduced
+DJ       0.00         2
+DJK      -0.0         2
+DK       0.0          2
+d1       0.00         1
+d2       0.00         1
+
+A-reduced
+DJ       0.00         1
+DJK      0.0          1
+DK       0.00         1
+deltaJ   0.0          1
+deltaK   0.0          1
+-----------------------------
+Nuclear Quadrupole Coupling
+Nucleus 1
+Xaa       2.302        2
+Xbb-Xcc   5.487        2
+Xab       0.00         1
+Xac       0.0          1
+Xbc       0.0          1
+
+TRANSITIONS
+(IN ORDER FOR THE TRANSITIONS TO RUN, THEY MUST HAVE QUANTUM NUMBERS, ASSIGNED FREQUENCY, AND ERROR)
+  5  1  5  6  4  1  4  5   9665.037      .005     
+  5  1  5  4  4  1  4  3   9665.083      .005
+  6  0  6  6  5  1  5  5   9751.057      .005
+  
+  
+  
