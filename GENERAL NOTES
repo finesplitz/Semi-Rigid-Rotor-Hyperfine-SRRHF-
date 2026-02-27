@@ -1,0 +1,16 @@
+INSTRUCTIONS FOR EVERYTHING
+
+FILES YOU NEED TO RUN 3TOP (srrhf3.0.exe)
+1)3TOP_INPUT.TXT - (input file free format) instructions given on other page.
+--------------
+2)DOUBLE CLICK THE .EXE FILE
+-------------------------
+3) RUN PROGRAM - PRODUCES:
+a) .pred file, which is all center frequencies ( if no hyperfine, then just semi-rigid rotor format)
+b) .freq file ( list of frequencies (similiar to spcat's .cat file)
+-------------------------
+GENERAL NOTES
+*I WROTE THIS PROGRAM TO BE ABLE TO USE IT WITH SPINN, WHICH IS A NEURAL NETWORK PROGRAM THAT WILL BE ABLE TO PREDICT TRANSITIONS, AUTOPICK TRANSITIONS, AND AUTOFIT. 
+AT THE MOMENT ONLY THE FITTING PROGRAM (3TOP which is a semi-rigid rotor fitter, srrhf) AND THE PEAK FINDER ARE MADE. THEY MAY STILL BE BUGGY, BUT THAT IS OKAY.
+-MJC
+**
