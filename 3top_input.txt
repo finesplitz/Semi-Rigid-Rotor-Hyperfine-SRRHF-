@@ -7,6 +7,8 @@ SPIN   1.0
 FTH    1.0
 FDIF   0.0025
 OLVL   0
+PUB    1
+DIAG   1
 DUMP   1.0
 
 # --- Prediction Settings ---
